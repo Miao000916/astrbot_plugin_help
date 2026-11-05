@@ -17,6 +17,11 @@
 | ---- | ---- | ------ |
 | `hidden_plugins` | 在 `/help` 中隐藏的插件名列表（归一化匹配） | `livingmemory`、`self_learning`、`meme_manager` |
 | `detail_source` | 详情页数据源：`md_first`（内置文档优先，注册表兜底）/ `dynamic_only`（只读指令注册表）/ `desc_only`（只显示插件简介） | `md_first` |
+| `display_mode` | 发送方式：`auto`（按估算长度自动选择）/ `plain`（总是纯文本，过长分段）/ `forward`（总是合并转发，仅 QQ） | `auto` |
+| `plugin_aliases` | 插件别名，格式 `插件名=别名`。/help 列表显示别名，/help <别名> 可查。解决插件名过长、含符号不好输入的问题 | 预填 6 个插件的短别名 |
+| `plugin_desc_overrides` | 自定义插件简介，格式 `插件名=简介`，覆盖自动读取的过长描述 | 预填 jmdownloader 的精简简介 |
+
+注：合并转发模式下不带独立的标题消息（标题节点会被平台单独发成一条合并转发，造成两条转发的冗余）。
 
 ## 数据源
 

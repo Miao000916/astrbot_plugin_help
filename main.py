@@ -15,8 +15,8 @@ except Exception:  # noqa: BLE001
 
 HELP_DIR = Path(__file__).parent / "help_data"
 WRAP_WIDTH = 34  # QQ 客户端约 17 汉字/行，折合 34 半角单位
-FORWARD_LINES = 20  # 估算显示行数超过此值改用合并转发
-NODE_CHUNK_LINES = 50  # 合并转发每个节点的行数
+FORWARD_LINES = 20  # auto 模式下估算显示行数超过此值改用合并转发
+NODE_CHUNK_LINES = 50  # 长消息分段/合并转发每个节点的行数
 PLUGIN_PREFIXES = ("astrbot_plugin_", "astrbot-plugin-")
 
 
@@ -44,6 +44,18 @@ def _estimate_lines(lines: list[str]) -> int:
     return sum(max(1, math.ceil(_display_width(line) / WRAP_WIDTH)) for line in lines)
 
 
+def _parse_kv_list(raw: list | None) -> dict[str, str]:
+    """把 ["插件名=值", ...] 形式的配置解析为 归一化插件名 -> 值 的字典。"""
+    result = {}
+    for item in raw or []:
+        if "=" in str(item):
+            key, value = str(item).split("=", 1)
+            key, value = key.strip(), value.strip()
+            if key and value:
+                result[_normalize(key)] = value
+    return result
+
+
 class HelpPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -60,6 +72,24 @@ class HelpPlugin(Star):
     def _hidden(self) -> set[str]:
         """配置中被隐藏的插件名集合（归一化后）。"""
         return {_normalize(x) for x in self.config.get("hidden_plugins", [])}
+
+    def _aliases(self) -> dict[str, str]:
+        """配置的插件别名：归一化插件名 -> 别名。"""
+        return _parse_kv_list(self.config.get("plugin_aliases", []))
+
+    def _desc_overrides(self) -> dict[str, str]:
+        """配置的自定义简介：归一化插件名 -> 简介。"""
+        return _parse_kv_list(self.config.get("plugin_desc_overrides", []))
+
+    def _name_of(self, md) -> str:
+        """插件的展示名：优先别名，其次 display_name，最后插件名。"""
+        alias = self._aliases().get(_normalize(md.name or ""))
+        return alias or md.display_name or md.name or "未知插件"
+
+    def _desc_of(self, md) -> str:
+        """插件的简介：优先自定义覆盖，其次 metadata 的 desc/short_desc。"""
+        override = self._desc_overrides().get(_normalize(md.name or ""))
+        return override or md.desc or md.short_desc or "（暂无简介）"
 
     def _visible_stars(self) -> list:
         """所有应在帮助中展示的插件：非内置、已激活、未被隐藏。"""
@@ -85,20 +115,18 @@ class HelpPlugin(Star):
 
     async def _overview(self, event: AstrMessageEvent):
         """列出所有已装第三方插件及一句话简介。"""
-        stars = sorted(
-            self._visible_stars(), key=lambda md: (md.name or "").lower()
-        )
+        stars = sorted(self._visible_stars(), key=lambda md: (md.name or "").lower())
 
         lines = []
         for md in stars:
-            display = md.display_name or md.name or "未知插件"
-            desc = md.desc or md.short_desc or "（暂无简介）"
-            lines.append(f"▪ {display}")
-            lines.append(f"  {desc}")
+            lines.append(f"▪ {self._name_of(md)}")
+            lines.append(f"  {self._desc_of(md)}")
         lines.append("")
         lines.append("发送 /help <插件名> 查看该插件的详细指令")
 
-        async for result in self._reply(event, f"📖 已安装插件（{len(stars)} 个）", lines):
+        async for result in self._reply(
+            event, f"📖 已安装插件（{len(stars)} 个）", lines
+        ):
             yield result
 
     async def _plugin_detail(self, event: AstrMessageEvent, plugin_name: str):
@@ -106,21 +134,24 @@ class HelpPlugin(Star):
         target = _normalize(plugin_name)
 
         if target in self._hidden():
-            yield event.plain_result(f"插件「{plugin_name}」已被设置为隐藏。").use_t2i(False)
+            yield event.plain_result(
+                f"插件「{plugin_name}」已被设置为隐藏。"
+            ).use_t2i(False)
             return
 
+        aliases = self._aliases()
         match = None
         for md in self._visible_stars():
+            key = _normalize(md.name or "")
             candidates = {md.name or "", md.display_name or ""}
+            if key in aliases:
+                candidates.add(aliases[key])
             if any(_normalize(c) == target for c in candidates if c):
                 match = md
                 break
 
         if not match:
-            available = sorted(
-                md.display_name or md.name or "未知插件"
-                for md in self._visible_stars()
-            )
+            available = sorted(self._name_of(md) for md in self._visible_stars())
             text = f"未找到插件「{plugin_name}」。\n可用插件：\n" + "\n".join(available)
             yield event.plain_result(text).use_t2i(False)
             return
@@ -129,7 +160,7 @@ class HelpPlugin(Star):
         name = match.name or ""
 
         if source == "desc_only":
-            lines = [match.desc or match.short_desc or "（暂无简介）"]
+            lines = [self._desc_of(match)]
         elif source == "dynamic_only":
             lines = await self._dynamic_commands(name)
         else:  # md_first：内置文档优先，缺失时动态读取
@@ -140,9 +171,7 @@ class HelpPlugin(Star):
                 lines = ["（该插件暂无维护的详细说明，以下为自动读取的指令列表）", ""]
                 lines += await self._dynamic_commands(name)
 
-        async for result in self._reply(
-            event, f"📦 {match.display_name or name}", lines
-        ):
+        async for result in self._reply(event, f"📦 {self._name_of(match)}", lines):
             yield result
 
     async def _dynamic_commands(self, plugin_name: str) -> list[str]:
@@ -179,15 +208,19 @@ class HelpPlugin(Star):
         return lines
 
     async def _reply(self, event: AstrMessageEvent, title: str, lines: list[str]):
-        """统一发送：按估算显示行数判断，短则纯文本，长则合并转发（非 QQ 平台分段发）。"""
-        if _estimate_lines([title] + lines) <= FORWARD_LINES:
-            yield event.chain_result(
-                [Plain(title + "\n" + "\n".join(lines))]
-            ).use_t2i(False)
-            return
+        """统一发送。display_mode: auto=按估算行数自动选择；plain=直接回复；forward=合并转发（仅 QQ）。
 
+        合并转发不带独立标题节点（标题节点会被平台单独发成一条合并转发，冗余）。
+        """
+        mode = self.config.get("display_mode", "auto")
+        use_forward = mode == "forward" or (
+            mode == "auto" and _estimate_lines([title] + lines) > FORWARD_LINES
+        )
         if event.get_platform_name() != "aiocqhttp":
-            # 非 QQ 平台不支持合并转发，分段发纯文本
+            # 非 QQ 平台不支持合并转发，降级为分段纯文本
+            use_forward = False
+
+        if not use_forward:
             for i in range(0, len(lines), NODE_CHUNK_LINES):
                 chunk = "\n".join(lines[i : i + NODE_CHUNK_LINES])
                 text = f"{title}\n{chunk}" if i == 0 else chunk
@@ -195,12 +228,12 @@ class HelpPlugin(Star):
             return
 
         self_id = event.get_self_id()
-        nodes = [Node(uin=self_id, name="帮助菜单", content=[Plain(title)])]
+        nodes = []
         for i in range(0, len(lines), NODE_CHUNK_LINES):
             nodes.append(
                 Node(
                     uin=self_id,
-                    name="帮助详情",
+                    name="帮助菜单",
                     content=[Plain("\n".join(lines[i : i + NODE_CHUNK_LINES]))],
                 )
             )

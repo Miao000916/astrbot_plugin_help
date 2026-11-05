@@ -14,5 +14,37 @@
     "default": "md_first",
     "description": "/help <插件名> 详情页的数据来源",
     "hint": "md_first=优先读插件内置说明文档，缺失时自动读取指令注册表；dynamic_only=只读指令注册表；desc_only=只显示插件简介"
+  },
+  "display_mode": {
+    "type": "string",
+    "options": ["auto", "plain", "forward"],
+    "default": "auto",
+    "description": "帮助消息的发送方式",
+    "hint": "auto=按估算长度自动选择；plain=总是直接回复纯文本（过长分段）；forward=总是用合并转发（仅 QQ 平台有效）"
+  },
+  "plugin_aliases": {
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "azurlane_assistant=碧蓝助手",
+      "bilibili=b站",
+      "music=点歌",
+      "setu=色图",
+      "blhx_wiki=wiki",
+      "jmdownloader=jm"
+    ],
+    "description": "插件别名，格式：插件名=别名",
+    "hint": "/help 列表中显示别名，/help <别名> 也能查询。插件名支持 astrbot_plugin_ 前缀或裸名，别名不区分大小写。用于解决插件名过长、含符号不好输入的问题"
+  },
+  "plugin_desc_overrides": {
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": ["jmdownloader=用 /jm <数字ID> 下载 JMComic 漫画并发送 PDF"],
+    "description": "自定义插件简介，格式：插件名=简介",
+    "hint": "覆盖自动读取的插件简介，用于精简过长的描述。留空则全部使用插件 metadata 中的原始简介"
   }
 }
