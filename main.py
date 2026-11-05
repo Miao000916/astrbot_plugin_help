@@ -1,6 +1,8 @@
+import math
+import unicodedata
 from pathlib import Path
 
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Node, Plain
 from astrbot.api.star import Context, Star
@@ -12,7 +14,8 @@ except Exception:  # noqa: BLE001
     list_commands = None
 
 HELP_DIR = Path(__file__).parent / "help_data"
-PLAIN_MAX_LINES = 20  # 超过此行数改用合并转发（参照 azurlane_assistant 的模式）
+WRAP_WIDTH = 34  # QQ 客户端约 17 汉字/行，折合 34 半角单位
+FORWARD_LINES = 20  # 估算显示行数超过此值改用合并转发
 NODE_CHUNK_LINES = 50  # 合并转发每个节点的行数
 PLUGIN_PREFIXES = ("astrbot_plugin_", "astrbot-plugin-")
 
@@ -31,17 +34,43 @@ def _normalize(name: str) -> str:
     return n.replace("-", "_")
 
 
+def _display_width(text: str) -> int:
+    """估算字符串在 QQ 客户端的显示宽度：全角字符计 2，其余计 1。"""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+
+
+def _estimate_lines(lines: list[str]) -> int:
+    """按显示宽度估算消息在客户端的实际行数（客户端按屏宽自动换行）。"""
+    return sum(max(1, math.ceil(_display_width(line) / WRAP_WIDTH)) for line in lines)
+
+
 class HelpPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
 
     async def initialize(self):
         """插件加载后检查帮助文档目录，日志记录加载到的文档数量。"""
         if HELP_DIR.is_dir():
-            docs = sorted(p.stem for p in HELP_DIR.glob("*.md"))
+            docs = sorted(p.stem for p in HELP_DIR.glob("*.txt"))
             logger.info(f"[help] 已加载 {len(docs)} 份插件帮助文档: {docs}")
         else:
             logger.warning(f"[help] 帮助文档目录不存在: {HELP_DIR}")
+
+    def _hidden(self) -> set[str]:
+        """配置中被隐藏的插件名集合（归一化后）。"""
+        return {_normalize(x) for x in self.config.get("hidden_plugins", [])}
+
+    def _visible_stars(self) -> list:
+        """所有应在帮助中展示的插件：非内置、已激活、未被隐藏。"""
+        hidden = self._hidden()
+        return [
+            md
+            for md in self.context.get_all_stars()
+            if not md.reserved
+            and md.activated
+            and _normalize(md.name or "") not in hidden
+        ]
 
     @filter.command("help", alias={"帮助", "菜单"})
     async def help(self, event: AstrMessageEvent, plugin_name: str = ""):
@@ -56,18 +85,16 @@ class HelpPlugin(Star):
 
     async def _overview(self, event: AstrMessageEvent):
         """列出所有已装第三方插件及一句话简介。"""
-        stars = [
-            md
-            for md in self.context.get_all_stars()
-            if not md.reserved and md.activated
-        ]
-        stars.sort(key=lambda md: (md.name or "").lower())
+        stars = sorted(
+            self._visible_stars(), key=lambda md: (md.name or "").lower()
+        )
 
         lines = []
         for md in stars:
             display = md.display_name or md.name or "未知插件"
             desc = md.desc or md.short_desc or "（暂无简介）"
-            lines.append(f"▪ {display}：{desc}")
+            lines.append(f"▪ {display}")
+            lines.append(f"  {desc}")
         lines.append("")
         lines.append("发送 /help <插件名> 查看该插件的详细指令")
 
@@ -75,12 +102,15 @@ class HelpPlugin(Star):
             yield result
 
     async def _plugin_detail(self, event: AstrMessageEvent, plugin_name: str):
-        """输出单个插件的详细指令说明。"""
+        """输出单个插件的详细指令说明，直奔内容，不带头部信息。"""
         target = _normalize(plugin_name)
+
+        if target in self._hidden():
+            yield event.plain_result(f"插件「{plugin_name}」已被设置为隐藏。").use_t2i(False)
+            return
+
         match = None
-        for md in self.context.get_all_stars():
-            if md.reserved or not md.activated:
-                continue
+        for md in self._visible_stars():
             candidates = {md.name or "", md.display_name or ""}
             if any(_normalize(c) == target for c in candidates if c):
                 match = md
@@ -89,35 +119,30 @@ class HelpPlugin(Star):
         if not match:
             available = sorted(
                 md.display_name or md.name or "未知插件"
-                for md in self.context.get_all_stars()
-                if not md.reserved and md.activated
+                for md in self._visible_stars()
             )
             text = f"未找到插件「{plugin_name}」。\n可用插件：\n" + "\n".join(available)
             yield event.plain_result(text).use_t2i(False)
             return
 
-        name = match.name or "未知"
-        display = match.display_name or name
-        header = [
-            f"📦 {display}（{name}）",
-            f"版本: {match.version or '未知'}  作者: {match.author or '未知'}",
-        ]
-        if match.repo:
-            header.append(f"仓库: {match.repo}")
+        source = self.config.get("detail_source", "md_first")
+        name = match.name or ""
 
-        md_file = HELP_DIR / f"{_normalize(name)}.md"
-        if md_file.is_file():
-            body = md_file.read_text(encoding="utf-8").strip()
-            lines = header + [""] + body.splitlines()
-        else:
-            lines = header + [
-                "",
-                "（该插件暂无维护的详细说明，以下为自动读取的指令列表）",
-                "",
-            ]
-            lines += await self._dynamic_commands(name)
+        if source == "desc_only":
+            lines = [match.desc or match.short_desc or "（暂无简介）"]
+        elif source == "dynamic_only":
+            lines = await self._dynamic_commands(name)
+        else:  # md_first：内置文档优先，缺失时动态读取
+            doc_file = HELP_DIR / f"{_normalize(name)}.txt"
+            if doc_file.is_file():
+                lines = doc_file.read_text(encoding="utf-8").strip().splitlines()
+            else:
+                lines = ["（该插件暂无维护的详细说明，以下为自动读取的指令列表）", ""]
+                lines += await self._dynamic_commands(name)
 
-        async for result in self._reply(event, header[0], lines):
+        async for result in self._reply(
+            event, f"📦 {match.display_name or name}", lines
+        ):
             yield result
 
     async def _dynamic_commands(self, plugin_name: str) -> list[str]:
@@ -154,8 +179,8 @@ class HelpPlugin(Star):
         return lines
 
     async def _reply(self, event: AstrMessageEvent, title: str, lines: list[str]):
-        """统一发送：短文本直接发，长文本在 QQ 平台转合并转发，其他平台分段发。"""
-        if len(lines) <= PLAIN_MAX_LINES:
+        """统一发送：按估算显示行数判断，短则纯文本，长则合并转发（非 QQ 平台分段发）。"""
+        if _estimate_lines([title] + lines) <= FORWARD_LINES:
             yield event.chain_result(
                 [Plain(title + "\n" + "\n".join(lines))]
             ).use_t2i(False)

@@ -1,0 +1,18 @@
+{
+  "hidden_plugins": {
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": ["livingmemory", "self_learning", "meme_manager"],
+    "description": "在 /help 中隐藏的插件",
+    "hint": "填插件名，支持 astrbot_plugin_ 前缀或裸名，不区分大小写和 -/_ 差异。适合隐藏无用户指令的后台功能型插件"
+  },
+  "detail_source": {
+    "type": "string",
+    "options": ["md_first", "dynamic_only", "desc_only"],
+    "default": "md_first",
+    "description": "/help <插件名> 详情页的数据来源",
+    "hint": "md_first=优先读插件内置说明文档，缺失时自动读取指令注册表；dynamic_only=只读指令注册表；desc_only=只显示插件简介"
+  }
+}
